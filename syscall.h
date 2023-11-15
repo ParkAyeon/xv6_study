@@ -20,3 +20,7 @@
 #define SYS_link   19
 #define SYS_mkdir  20
 #define SYS_close  21
+#define SYS_forknexec 22 //define system call numbers
+#define SYS_set_proc_priority 23 //define system call
+#define SYS_get_proc_state 24 //define system call
+#define SYS_get_proc_priority 25 //define system call

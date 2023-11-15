@@ -6,6 +6,7 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "elf.h"
 
 struct {
   struct spinlock lock;
@@ -38,10 +39,10 @@ struct cpu*
 mycpu(void)
 {
   int apicid, i;
-  
+
   if(readeflags()&FL_IF)
     panic("mycpu called with interrupts enabled\n");
-  
+
   apicid = lapicid();
   // APIC IDs are not guaranteed to be contiguous. Maybe we should have
   // a reverse map, or reserve a register to store &cpus[i].
@@ -88,7 +89,8 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
-
+  p->priority = 5;         //Default priority
+  p->exec_num = 0;         //Default execution number
   release(&ptable.lock);
 
   // Allocate kernel stack.
@@ -124,7 +126,7 @@ userinit(void)
   extern char _binary_initcode_start[], _binary_initcode_size[];
 
   p = allocproc();
-  
+
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
     panic("userinit: out of memory?");
@@ -275,7 +277,7 @@ wait(void)
   struct proc *p;
   int havekids, pid;
   struct proc *curproc = myproc();
-  
+
   acquire(&ptable.lock);
   for(;;){
     // Scan through table looking for exited children.
@@ -322,26 +324,44 @@ wait(void)
 void
 scheduler(void)
 {
+  //Priority Scheduler 
   struct proc *p;
+  struct proc *p1;
+
   struct cpu *c = mycpu();
   c->proc = 0;
-  
+
   for(;;){
     // Enable interrupts on this processor.
     sti();
+    struct proc *highP = 0; //preemtive
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
+      if(p->state != RUNNABLE) // if use '==', have to write more code
         continue;
 
+      highP = p;
+
+      for(p1 = ptable.proc; p1<&ptable.proc[NPROC]; p1++){
+
+	      if(p1->state != RUNNABLE)
+		      continue;
+	      if(highP->priority + highP->exec_num > p1->priority + p1->exec_num)
+		      highP = p1;
+      }
+      
+      p = highP;
+      
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
-      c->proc = p;
+      c->proc = p; 
+
       switchuvm(p);
       p->state = RUNNING;
+      p->exec_num++;
 
       swtch(&(c->scheduler), p->context);
       switchkvm();
@@ -418,7 +438,7 @@ void
 sleep(void *chan, struct spinlock *lk)
 {
   struct proc *p = myproc();
-  
+
   if(p == 0)
     panic("sleep");
 
@@ -531,4 +551,196 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+
+int
+forknexec(char *path, char **args){ //without const
+
+  char *s, *last;
+  int i, off;
+  uint argc, sz, sp, ustack[3+MAXARG+1];
+  struct elfhdr elf;
+  struct inode *ip;
+  struct proghdr ph;
+  pde_t *pgdir;
+  int pid;
+
+  struct proc *np;
+  struct proc *curproc = myproc();
+
+  begin_op();
+
+  if((ip = namei(path)) == 0){
+    end_op();
+    cprintf("forknexec: fail\n");
+    return -2;
+  }
+  ilock(ip);
+  pgdir = 0;
+
+  // Check ELF header
+  if(readi(ip, (char*)&elf, 0, sizeof(elf)) != sizeof(elf))
+    goto bad;
+  if(elf.magic != ELF_MAGIC)
+    goto bad;
+
+  if((pgdir = setupkvm()) == 0)
+    goto bad;
+  // Clear %eax so that fork returns 0 in the child.
+
+  // Load program into memory.
+  sz = 0;
+  for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
+    if(readi(ip, (char*)&ph, off, sizeof(ph)) != sizeof(ph))
+      goto bad;
+    if(ph.type != ELF_PROG_LOAD)
+      continue;
+    if(ph.memsz < ph.filesz)
+      goto bad;
+    if(ph.vaddr + ph.memsz < ph.vaddr)
+      goto bad;
+    if((sz = allocuvm(pgdir, sz, ph.vaddr + ph.memsz)) == 0)
+      goto bad;
+    if(ph.vaddr % PGSIZE != 0)
+      goto bad;
+    if(loaduvm(pgdir, (char*)ph.vaddr, ip, ph.off, ph.filesz) < 0)
+      goto bad;
+  }
+  iunlockput(ip);
+  end_op();
+  ip = 0;
+
+  // Allocate two pages at the next page boundary.
+  // Make the first inaccessible.  Use the second as the user stack.
+  sz = PGROUNDUP(sz);
+  if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0)
+    goto bad;
+  clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
+  sp = sz;
+
+  // Push argument strings, prepare rest of stack in ustack.
+  for(argc = 0; args[argc]; argc++) {
+    if(argc >= MAXARG)
+      goto bad;
+    sp = (sp - (strlen(args[argc]) + 1)) & ~3;
+    if(copyout(pgdir, sp, args[argc], strlen(args[argc]) + 1) < 0)
+      goto bad;
+    ustack[3+argc] = sp;
+  }
+  ustack[3+argc] = 0;
+
+  ustack[0] = 0xffffffff;  // fake return PC
+  ustack[1] = argc;
+  ustack[2] = sp - (argc+1)*4;  // args pointer
+
+  sp -= (3+argc+1) * 4;
+  if(copyout(pgdir, sp, ustack, (3+argc+1)*4) < 0)
+    goto bad;
+
+  if((np = allocproc()) == 0) {
+    return -2;
+  }
+
+  for(i=0; i < NOFILE; i++)
+    if(curproc->ofile[i])
+      np->ofile[i] = filedup(curproc->ofile[i]);
+  np->cwd = idup(curproc->cwd);
+
+  //
+
+  np->sz = curproc->sz;
+  np->parent = curproc;
+  *np->tf = *curproc->tf;
+
+  // Save program name for debugging.
+  for(last=s=path; *s; s++)
+    if(*s == '/')
+      last = s+1;
+  // cprintf("%s\n", path);
+  // cprintf("%s\n", args[1]);
+  safestrcpy(np->name, last, sizeof(np->name));
+
+  // Commit to the user image
+  pid = np->pid;
+  np->pgdir = pgdir;
+  np->sz = sz;
+  np->tf->eip = elf.entry;  // main
+  np->tf->esp = sp;
+  np->tf->eax = pid;
+
+  acquire(&ptable.lock);
+  np->state = RUNNABLE;
+  release(&ptable.lock);
+
+  // switchuvm(curproc);
+  // freevm(oldpgdir);
+  return curproc->pid;
+
+
+  bad:
+    if(pgdir)
+      freevm(pgdir);
+    if(ip){
+      iunlockput(ip);
+      end_op();
+    }
+    return -1;
+
+
+}
+
+int 
+set_proc_priority(int pid, int priority) {
+	struct proc *p;
+
+	acquire(&ptable.lock);
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+		if(p->pid == pid) {
+			p->priority = priority;
+			break;
+		}
+	}
+	release(&ptable.lock);
+
+	return pid;
+}
+
+int 
+get_proc_state() {
+	struct proc *p;
+
+	sti();
+
+	acquire(&ptable.lock);
+	cprintf("name \t pid \t state \t \t priority \t \t exec_num \n");
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+		if ( p->state == SLEEPING )
+			cprintf("%s \t %d \t SLEEPING \t %d \t %d\n ", p->name, p->pid, p->priority, p->exec_num);
+		else if (p->state == RUNNING )
+			cprintf("%s \t %d \t RUNNING \t %d \t %d\n ", p->name, p->pid, p->priority, p->exec_num);
+		else if (p->state == RUNNABLE )
+			cprintf("%s \t%d \t RUNNABLE \t %d \t %d\n ", p->name, p->pid, p->priority, p->exec_num);
+	}
+
+	release(&ptable.lock);
+
+	return 24;
+}
+
+int
+get_proc_priority(int pid){
+	struct proc *p;
+
+	sti();
+
+	acquire(&ptable.lock);
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+		if (p->pid == pid){
+			cprintf("ID = %d, Priority = %d", p->pid, p->priority);
+			break;}
+	}
+	release(&ptable.lock);	
+	
+	return pid; 
 }
