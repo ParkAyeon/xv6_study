@@ -27,6 +27,7 @@ int forknexec(char*, char**); //add system call without const
 int set_proc_priority(int, int); //add system call
 int get_proc_state(); //add system call
 int get_proc_priority(int); //add system call
+int getNumFreePages(void);//add system call for cow
 
 // ulib.c
 int stat(const char*, struct stat*);

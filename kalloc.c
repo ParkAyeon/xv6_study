@@ -21,6 +21,8 @@ struct {
   struct spinlock lock;
   int use_lock;
   struct run *freelist;
+  uint num_free_pages; //number of free pages
+  uint pgrefcount[PHYSTOP >> PGSHIFT]; //reference counter for physical memory pages
 } kmem;
 
 // Initialization happens in two phases.
@@ -33,6 +35,7 @@ kinit1(void *vstart, void *vend)
 {
   initlock(&kmem.lock, "kmem");
   kmem.use_lock = 0;
+  kmem.num_free_pages = 0; //initialize number of free page as 0
   freerange(vstart, vend);
 }
 
@@ -48,8 +51,10 @@ freerange(void *vstart, void *vend)
 {
   char *p;
   p = (char*)PGROUNDUP((uint)vstart);
-  for(; p + PGSIZE <= (char*)vend; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)vend; p += PGSIZE){
+    kmem.pgrefcount[V2P(p) >> PGSHIFT] = 0; //initailize pgrefcount
     kfree(p);
+  }
 }
 //PAGEBREAK: 21
 // Free the page of physical memory pointed at by v,
@@ -69,9 +74,22 @@ kfree(char *v)
 
   if(kmem.use_lock)
     acquire(&kmem.lock);
-  r = (struct run*)v;
-  r->next = kmem.freelist;
-  kmem.freelist = r;
+
+  //add for cow
+  if(get_refcount(V2P(v)) > 0)
+    dec_refcount(V2P(v));  //decrease refcount after free
+
+  if(get_refcount(V2P(v)) == 0) 
+  {
+    memset(v, 1, PGSIZE);
+    kmem.num_free_pages++; //++
+    
+    r = (struct run*)v;
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+  }
+  //end
+
   if(kmem.use_lock)
     release(&kmem.lock);
 }
@@ -86,11 +104,34 @@ kalloc(void)
 
   if(kmem.use_lock)
     acquire(&kmem.lock);
+
+  kmem.num_free_pages--; //decrease free page number in allocation page
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
+    kmem.pgrefcount[V2P((char*)r) >> PGSHIFT] = 1;//set pgrefcount to 1 when allocating 
+  }
   if(kmem.use_lock)
     release(&kmem.lock);
   return (char*)r;
 }
 
+uint numFreePages(void)
+{
+  acquire(&kmem.lock);
+  uint fp = kmem.num_free_pages;
+  release(&kmem.lock);
+  return fp;
+}
+
+uint get_refcount(uint pa){
+  return kmem.pgrefcount[pa >> PGSHIFT];
+}
+
+void inc_refcount(uint pa){
+  ++kmem.pgrefcount[pa >> PGSHIFT];
+}
+
+void dec_refcount(uint pa){
+  --kmem.pgrefcount[pa >> PGSHIFT];
+}

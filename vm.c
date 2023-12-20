@@ -6,6 +6,7 @@
 #include "mmu.h"
 #include "proc.h"
 #include "elf.h"
+#include <stdio.h>
 
 extern char data[];  // defined by kernel.ld
 pde_t *kpgdir;  // for use in scheduler()
@@ -318,7 +319,7 @@ copyuvm(pde_t *pgdir, uint sz)
   pde_t *d;
   pte_t *pte;
   uint pa, i, flags;
-  char *mem;
+  //char *mem;
 
   if((d = setupkvm()) == 0)
     return 0;
@@ -327,16 +328,22 @@ copyuvm(pde_t *pgdir, uint sz)
       panic("copyuvm: pte should exist");
     if(!(*pte & PTE_P))
       panic("copyuvm: page not present");
+    *pte &= ~PTE_W; //delete write permission
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
+    /*
     if((mem = kalloc()) == 0)
       goto bad;
     memmove(mem, (char*)P2V(pa), PGSIZE);
-    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
-      kfree(mem);
+    */
+
+    if(mappages(d, (void*)i, PGSIZE, pa, flags) < 0) {
+      //kfree(mem);
       goto bad;
     }
+    inc_refcount(pa); //increase refcount
   }
+  lcr3(V2P(pgdir)); //flush TLB for original process
   return d;
 
 bad:
@@ -392,3 +399,31 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 //PAGEBREAK!
 // Blank page.
 
+void pagefault(void)
+{
+  uint pf_VA;
+  pte_t *pte;
+  uint rc, pa;
+
+  if((pf_VA = rcr2()) < 0){
+    panic("wrong access");
+    return;
+  }
+
+  pte = walkpgdir(myproc()->pgdir, (void*)pf_VA, 0);
+  pa = PTE_ADDR(*pte);
+  rc = get_refcount(pa);
+  //cprintf("Page fault occured\n");
+  if(rc > 1) {
+    char *mem;
+    if((mem = kalloc()) == 0)
+      return;
+    memmove(mem, (char*)P2V(pa), PGSIZE);
+    *pte = V2P(mem) | PTE_P | PTE_U | PTE_W;
+    dec_refcount(pa);
+  }
+  else if(rc == 1){
+    *pte |= PTE_W;
+  }
+  lcr3(V2P(myproc()->pgdir));
+}

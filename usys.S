@@ -33,3 +33,5 @@ SYSCALL(forknexec)
 SYSCALL(set_proc_priority)
 SYSCALL(get_proc_state)
 SYSCALL(get_proc_priority)
+SYSCALL(getNumFreePages)
+

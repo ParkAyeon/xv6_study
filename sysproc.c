@@ -137,3 +137,8 @@ sys_get_proc_priority(void){
 		return -1;
 	return get_proc_priority(pid);
 }
+
+int
+sys_getNumFreePages(void){
+	return numFreePages();
+}

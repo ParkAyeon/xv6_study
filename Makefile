@@ -188,6 +188,8 @@ UPROGS=\
 	_testget\
 	_testcreate\
 	_teststate\
+	_testcow1\
+	_testcow2\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)
@@ -267,7 +269,9 @@ EXTRA=\
 	testget.c\
 	testcreate.c\
 	teststate.c\
-
+	testcow1.c\
+	testcow2.c\
+	
 dist:
 	rm -rf dist
 	mkdir dist

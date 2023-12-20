@@ -24,3 +24,4 @@
 #define SYS_set_proc_priority 23 //define system call
 #define SYS_get_proc_state 24 //define system call
 #define SYS_get_proc_priority 25 //define system call
+#define SYS_getNumFreePages 26 //define system call for cow
